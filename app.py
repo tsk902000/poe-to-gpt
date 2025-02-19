@@ -255,7 +255,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                             yield f"data: {json.dumps(chunk)}\n\n"
                             last_sent_base_content = base_content
 
-                    # 发送结束标记
+                    # send
                     end_chunk = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
@@ -270,7 +270,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     yield f"data: {json.dumps(end_chunk)}\n\n"
                     yield "data: [DONE]\n\n"
 
-                    # 打印完整的流式响应（限制长度）
+                    # log all
                     logger.info(f"Stream Response [{request_id}]: {total_response[:200]}..." if len(
                         total_response) > 200 else total_response)
                 except BotError as be:
