@@ -214,9 +214,8 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 @router.post("/chat/completions")
 async def create_completion(request: CompletionRequest, token: str = Depends(verify_token)):
     request_id = "chat$poe-to-gpt$-" + token[:6]
-
     try:
-        # Log request parameters (hiding sensitive data)
+        # Log request parameters (safely hide content if too long)
         safe_request = request.model_dump()
         if "messages" in safe_request:
             safe_request["messages"] = [
@@ -231,10 +230,9 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         model_lower = request.model.lower()
         if model_lower not in bot_names_map:
             raise HTTPException(status_code=400, detail=f"Model {request.model} not found")
-
         request.model = bot_names_map[model_lower]
-        
-        # Convert Message to ProtocolMessage objects, including attachments.
+
+        # Convert Message objects to ProtocolMessage objects (including attachments)
         protocol_messages = []
         for msg in request.messages:
             pm = ProtocolMessage(
@@ -248,17 +246,17 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         poe_token = next(api_key_cycle)
 
         if request.stream:
-            import re
+            # Streaming response: similar to your original implementation
             async def response_generator():
                 total_response = ""
                 last_sent_base_content = None
+
+                import re
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
 
                 try:
-                    # IMPORTANT: If tools were provided but tool_executables is None,
-                    # pass an empty list to satisfy the assertion in fastapi_poe.
+                    # Ensure tool_executables is provided when tools are passed
                     executables = request.tool_executables if request.tool_executables is not None else []
-
                     async for partial in get_bot_response(
                         protocol_messages,
                         bot_name=request.model,
@@ -267,12 +265,11 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                         tools=request.tools,
                         tool_executables=executables
                     ):
+                        # Ignore placeholder texts
                         if partial and partial.text:
                             if partial.text.strip() in ["Thinking...", "Generating image..."]:
                                 continue
-                                
                             base_content = elapsed_time_pattern.sub("", partial.text)
-
                             if last_sent_base_content == base_content:
                                 continue
 
@@ -283,9 +280,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                                 "created": int(asyncio.get_event_loop().time()),
                                 "model": request.model,
                                 "choices": [{
-                                    "delta": {
-                                        "content": base_content
-                                    },
+                                    "delta": {"content": base_content},
                                     "index": 0,
                                     "finish_reason": None
                                 }]
@@ -293,7 +288,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                             yield f"data: {json.dumps(chunk)}\n\n"
                             last_sent_base_content = base_content
 
-                    # Send completion marker
+                    # Send the final chunk marker to indicate completion
                     end_chunk = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
@@ -308,32 +303,42 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     yield f"data: {json.dumps(end_chunk)}\n\n"
                     yield "data: [DONE]\n\n"
 
-                    logger.info(f"Stream Response [{request_id}]: "
-                                f"{total_response[:200]}..." if len(total_response) > 200 else total_response)
-                except BotError as be:
-                    error_chunk = {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(asyncio.get_event_loop().time()),
-                        "model": request.model,
-                        "choices": [{
-                            "delta": {
-                                "content": json.loads(be.args[0])["text"]
-                            },
-                            "index": 0,
-                            "finish_reason": "error"
-                        }]
-                    }
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    logger.error(f"BotError in stream generation for [{request_id}]: {str(be)}")
+                    logger.info(f"Stream Response [{request_id}]: {total_response[:200]+'...' if len(total_response) > 200 else total_response}")
                 except Exception as e:
                     logger.error(f"Error in stream generation for [{request_id}]: {str(e)}")
                     raise
 
             return StreamingResponse(response_generator(), media_type="text/event-stream")
         else:
+            # Non-streaming response
             response = await get_responses(request, poe_token)
+            # Attempt to see if GPT has returned a function call by parsing the response as JSON.
+            try:
+                parsed_response = json.loads(response)
+                if isinstance(parsed_response, dict) and "name" in parsed_response and "arguments" in parsed_response:
+                    # Build and return a structured response for a function call.
+                    response_data = {
+                        "id": request_id,
+                        "object": "chat.completion",
+                        "created": int(asyncio.get_event_loop().time()),
+                        "model": request.model,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "function_call": parsed_response
+                            },
+                            "finish_reason": "function_call"
+                        }]
+                    }
+                    logger.info(f"Function Call Response [{request_id}]: {json.dumps(response_data)}")
+                    return response_data
+            except json.JSONDecodeError:
+                # If the response is not JSON decodable or not a function call, fall through to returning text.
+                pass
+
+            # Default: return the response as a normal text output.
             response_data = {
                 "id": request_id,
                 "object": "chat.completion",
@@ -348,11 +353,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     "finish_reason": "stop"
                 }]
             }
-            safe_response = {**response_data}
-            if len(response) > 200:
-                logger.info(f"Response [{request_id}]: {json.dumps(safe_response, ensure_ascii=False)[:200]}...")
-            else:
-                logger.info(f"Response [{request_id}]: {json.dumps(safe_response, ensure_ascii=False)}")
+            logger.info(f"Text Response [{request_id}]: {json.dumps(response_data, ensure_ascii=False)[:200]+'...' if len(response) > 200 else json.dumps(response_data, ensure_ascii=False)}")
             return response_data
     except GeneratorExit:
         logger.info(f"GeneratorExit exception caught for request [{request_id}]")
@@ -360,7 +361,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         error_msg = f"Error during response for request [{request_id}]: {str(e)}"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @router.get("/models")
 @router.get("/v1/models")
 async def get_models():
