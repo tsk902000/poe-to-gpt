@@ -15,19 +15,19 @@ from fastapi.responses import StreamingResponse
 from fastapi_poe.types import ProtocolMessage
 from fastapi_poe.client import get_bot_response, get_final_response, QueryRequest, BotError
 
-# 加载环境变量
+# Read ENV
 load_dotenv()
 
 app = FastAPI()
 security = HTTPBearer()
 router = APIRouter()
 
-# 从环境变量获取配置
+# ENV to Properties
 PORT = int(os.getenv("PORT", 3700))
 TIMEOUT = int(os.getenv("TIMEOUT", 120))
 PROXY = os.getenv("PROXY", "")
 
-# 解析JSON数组格式的环境变量
+# json
 def parse_json_env(env_name, default=None):
     value = os.getenv(env_name)
     if value:
@@ -48,18 +48,18 @@ ACCESS_TOKENS = set(parse_json_env("ACCESS_TOKENS"))
 BOT_NAMES = parse_json_env("BOT_NAMES")
 POE_API_KEYS = parse_json_env("POE_API_KEYS")
 
-# 设置日志
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 初始化代理
+# init
 proxy = None
 if not PROXY:
     proxy = AsyncClient(timeout=TIMEOUT)
 else:
     proxy = AsyncClient(proxy=PROXY, timeout=TIMEOUT)
 
-# 初始化客户端字典和API密钥循环
+# init dictionary and api
 client_dict = {}
 api_key_cycle = None
 
@@ -195,7 +195,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
     request_id = "chat$poe-to-gpt$-" + token[:6]
 
     try:
-        # 打印请求参数（隐藏敏感信息）
+        # print log
         safe_request = request.model_dump()
         if "messages" in safe_request:
             safe_request["messages"] = [
@@ -312,7 +312,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     "finish_reason": "stop"
                 }]
             }
-            # 打印完整响应（限制长度）
+            # print full response
             safe_response = {**response_data}
             if len(response) > 200:
                 logger.info(f"Response [{request_id}]: {json.dumps(safe_response, ensure_ascii=False)[:200]}...")
