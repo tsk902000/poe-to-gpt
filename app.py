@@ -27,7 +27,7 @@ PORT = int(os.getenv("PORT", 3700))
 TIMEOUT = int(os.getenv("TIMEOUT", 120))
 PROXY = os.getenv("PROXY", "")
 
-# Helper to parse JSON array from env
+# Parse JSON array from environment variable
 def parse_json_env(env_name, default=None):
     value = os.getenv(env_name)
     if value:
@@ -52,7 +52,7 @@ POE_API_KEYS = parse_json_env("POE_API_KEYS")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Initialize proxy for HTTP client
+# Initialize AsyncClient proxy for HTTP requests
 if not PROXY:
     proxy = AsyncClient(timeout=TIMEOUT)
 else:
@@ -69,12 +69,12 @@ bot_names_map = {name.lower(): name for name in BOT_NAMES}
 class Message(BaseModel):
     role: str
     content: str
-    # New field: attachments supported by the fastapi_poe.Attachment model
+    # New field: allow attachments using fastapi_poe.Attachment
     attachments: Optional[List[Attachment]] = None
 
 # -------------------------------------------------------------------
-# STEP 2: Add function call (tools) support.
-# Update the CompletionRequest model to allow passing tools (function definitions)
+# STEP 2: Add function calling (tools) support.
+# Update the CompletionRequest model to allow passing tools and tool executables.
 # -------------------------------------------------------------------
 class CompletionRequest(BaseModel):
     model: str
@@ -86,8 +86,11 @@ class CompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, int]] = None
     stop_sequences: Optional[List[str]] = None
-    # New field for OpenAI function calling via tool definitions
+    # New field for OpenAI function calling: tool definitions.
     tools: Optional[List[ToolDefinition]] = None
+    # New field for function calling: tool executables.
+    # Ensure that if tools are provided, tool_executables is explicitly set (can be empty).
+    tool_executables: Optional[List[Any]] = None
 
     class Config:
         json_schema_extra = {
@@ -98,7 +101,8 @@ class CompletionRequest(BaseModel):
                     {"role": "user", "content": "Hello!"}
                 ],
                 "stream": True,
-                "tools": []  # example: an empty list means no functions are being called
+                "tools": [],  # example: no functions are being called
+                "tool_executables": []  # must be provided if tools are passed
             }
         }
 
@@ -138,7 +142,7 @@ async def add_token(token: str):
         logger.info(f"apikey already exists: {token[:6]}...")
         return "exist"
 
-# Helper to invoke the non-streaming response.
+# Helper for non-streaming responses.
 async def get_responses(request: CompletionRequest, token: str):
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
@@ -147,8 +151,7 @@ async def get_responses(request: CompletionRequest, token: str):
     if model_lower in bot_names_map:
         request.model = bot_names_map[model_lower]
         
-        # Convert internal Message objects to ProtocolMessage objects,
-        # including attachments if provided.
+        # Convert internal Message objects to ProtocolMessage objects, including attachments.
         protocol_messages = []
         for msg in request.messages:
             pm = ProtocolMessage(
@@ -213,7 +216,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
     request_id = "chat$poe-to-gpt$-" + token[:6]
 
     try:
-        # Log request parameters (hide sensitive information)
+        # Log request parameters (hiding sensitive data)
         safe_request = request.model_dump()
         if "messages" in safe_request:
             safe_request["messages"] = [
@@ -231,7 +234,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
 
         request.model = bot_names_map[model_lower]
         
-        # Convert Message to ProtocolMessage objects, including attachments
+        # Convert Message to ProtocolMessage objects, including attachments.
         protocol_messages = []
         for msg in request.messages:
             pm = ProtocolMessage(
@@ -252,13 +255,17 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
 
                 try:
-                    # Pass the tools parameter for function calling if provided.
+                    # IMPORTANT: If tools were provided but tool_executables is None,
+                    # pass an empty list to satisfy the assertion in fastapi_poe.
+                    executables = request.tool_executables if request.tool_executables is not None else []
+
                     async for partial in get_bot_response(
                         protocol_messages,
                         bot_name=request.model,
                         api_key=poe_token,
                         session=proxy,
-                        tools=request.tools
+                        tools=request.tools,
+                        tool_executables=executables
                     ):
                         if partial and partial.text:
                             if partial.text.strip() in ["Thinking...", "Generating image..."]:
