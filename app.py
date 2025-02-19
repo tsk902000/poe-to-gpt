@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 import asyncio
 import uvicorn
@@ -12,22 +12,22 @@ from httpx import AsyncClient
 from fastapi import FastAPI, HTTPException, Depends, APIRouter
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
-from fastapi_poe.types import ProtocolMessage
+from fastapi_poe.types import ProtocolMessage, Attachment, ToolDefinition
 from fastapi_poe.client import get_bot_response, get_final_response, QueryRequest, BotError
 
-# Read ENV
+# Load environment variables
 load_dotenv()
 
 app = FastAPI()
 security = HTTPBearer()
 router = APIRouter()
 
-# ENV to Properties
+# From environment variables
 PORT = int(os.getenv("PORT", 3700))
 TIMEOUT = int(os.getenv("TIMEOUT", 120))
 PROXY = os.getenv("PROXY", "")
 
-# json
+# Helper to parse JSON array from env
 def parse_json_env(env_name, default=None):
     value = os.getenv(env_name)
     if value:
@@ -48,29 +48,34 @@ ACCESS_TOKENS = set(parse_json_env("ACCESS_TOKENS"))
 BOT_NAMES = parse_json_env("BOT_NAMES")
 POE_API_KEYS = parse_json_env("POE_API_KEYS")
 
-
+# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# init
-proxy = None
+# Initialize proxy for HTTP client
 if not PROXY:
     proxy = AsyncClient(timeout=TIMEOUT)
 else:
     proxy = AsyncClient(proxy=PROXY, timeout=TIMEOUT)
 
-# init dictionary and api
+# Client API key management
 client_dict = {}
 api_key_cycle = None
-
 bot_names_map = {name.lower(): name for name in BOT_NAMES}
 
-
+# -------------------------------------------------------------------
+# STEP 1: Add attachment support by updating the Message model.
+# -------------------------------------------------------------------
 class Message(BaseModel):
     role: str
     content: str
+    # New field: attachments supported by the fastapi_poe.Attachment model
+    attachments: Optional[List[Attachment]] = None
 
-
+# -------------------------------------------------------------------
+# STEP 2: Add function call (tools) support.
+# Update the CompletionRequest model to allow passing tools (function definitions)
+# -------------------------------------------------------------------
 class CompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -81,6 +86,8 @@ class CompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, int]] = None
     stop_sequences: Optional[List[str]] = None
+    # New field for OpenAI function calling via tool definitions
+    tools: Optional[List[ToolDefinition]] = None
 
     class Config:
         json_schema_extra = {
@@ -90,10 +97,10 @@ class CompletionRequest(BaseModel):
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Hello!"}
                 ],
-                "stream": True
+                "stream": True,
+                "tools": []  # example: an empty list means no functions are being called
             }
         }
-
 
 async def add_token(token: str):
     global api_key_cycle
@@ -103,7 +110,7 @@ async def add_token(token: str):
 
     if token not in client_dict:
         try:
-            logger.info(f"Attempting to add apikey: {token[:6]}...")  # 只记录前6位
+            logger.info(f"Attempting to add apikey: {token[:6]}...")  # Only log first 6 characters
             request = CompletionRequest(
                 model="GPT-3.5-Turbo",
                 messages=[Message(role="user", content="Please return 'OK'")],
@@ -131,7 +138,7 @@ async def add_token(token: str):
         logger.info(f"apikey already exists: {token[:6]}...")
         return "exist"
 
-
+# Helper to invoke the non-streaming response.
 async def get_responses(request: CompletionRequest, token: str):
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
@@ -139,18 +146,31 @@ async def get_responses(request: CompletionRequest, token: str):
     model_lower = request.model.lower()
     if model_lower in bot_names_map:
         request.model = bot_names_map[model_lower]
-        message = [
-            ProtocolMessage(role=msg.role if msg.role in ["user", "system"] else "bot", content=msg.content)
-            for msg in request.messages
-        ]
+        
+        # Convert internal Message objects to ProtocolMessage objects,
+        # including attachments if provided.
+        protocol_messages = []
+        for msg in request.messages:
+            pm = ProtocolMessage(
+                role=msg.role if msg.role in ["user", "system"] else "bot",
+                content=msg.content
+            )
+            if msg.attachments:
+                pm.attachments = msg.attachments
+            protocol_messages.append(pm)
+        
         additional_params = {
             "temperature": request.temperature,
             "skip_system_prompt": request.skip_system_prompt if request.skip_system_prompt is not None else False,
             "logit_bias": request.logit_bias if request.logit_bias is not None else {},
             "stop_sequences": request.stop_sequences if request.stop_sequences is not None else []
         }
+        # Inject tools into the query if provided (for function calling)
+        if request.tools is not None:
+            additional_params["tools"] = request.tools
+
         query = QueryRequest(
-            query=message,
+            query=protocol_messages,
             user_id="",
             conversation_id="",
             message_id="",
@@ -165,7 +185,6 @@ async def get_responses(request: CompletionRequest, token: str):
             raise HTTPException(status_code=500, detail=str(e))
     else:
         raise HTTPException(status_code=400, detail=f"Model {request.model} is not supported")
-
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
@@ -188,14 +207,13 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
         )
     return credentials.credentials
 
-
 @router.post("/v1/chat/completions")
 @router.post("/chat/completions")
 async def create_completion(request: CompletionRequest, token: str = Depends(verify_token)):
     request_id = "chat$poe-to-gpt$-" + token[:6]
 
     try:
-        # print log
+        # Log request parameters (hide sensitive information)
         safe_request = request.model_dump()
         if "messages" in safe_request:
             safe_request["messages"] = [
@@ -213,10 +231,17 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
 
         request.model = bot_names_map[model_lower]
         
-        protocol_messages = [
-            ProtocolMessage(role=msg.role if msg.role in ["user", "system"] else "bot", content=msg.content)
-            for msg in request.messages
-        ]
+        # Convert Message to ProtocolMessage objects, including attachments
+        protocol_messages = []
+        for msg in request.messages:
+            pm = ProtocolMessage(
+                role=msg.role if msg.role in ["user", "system"] else "bot",
+                content=msg.content
+            )
+            if msg.attachments:
+                pm.attachments = msg.attachments
+            protocol_messages.append(pm)
+
         poe_token = next(api_key_cycle)
 
         if request.stream:
@@ -227,8 +252,14 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
 
                 try:
-                    async for partial in get_bot_response(protocol_messages, bot_name=request.model, api_key=poe_token,
-                                                          session=proxy):
+                    # Pass the tools parameter for function calling if provided.
+                    async for partial in get_bot_response(
+                        protocol_messages,
+                        bot_name=request.model,
+                        api_key=poe_token,
+                        session=proxy,
+                        tools=request.tools
+                    ):
                         if partial and partial.text:
                             if partial.text.strip() in ["Thinking...", "Generating image..."]:
                                 continue
@@ -255,7 +286,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                             yield f"data: {json.dumps(chunk)}\n\n"
                             last_sent_base_content = base_content
 
-                    # send
+                    # Send completion marker
                     end_chunk = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
@@ -270,11 +301,9 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     yield f"data: {json.dumps(end_chunk)}\n\n"
                     yield "data: [DONE]\n\n"
 
-                    # log all
-                    logger.info(f"Stream Response [{request_id}]: {total_response[:200]}..." if len(
-                        total_response) > 200 else total_response)
+                    logger.info(f"Stream Response [{request_id}]: "
+                                f"{total_response[:200]}..." if len(total_response) > 200 else total_response)
                 except BotError as be:
-                    
                     error_chunk = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
@@ -312,7 +341,6 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     "finish_reason": "stop"
                 }]
             }
-            # print full response
             safe_response = {**response_data}
             if len(response) > 200:
                 logger.info(f"Response [{request_id}]: {json.dumps(safe_response, ensure_ascii=False)[:200]}...")
@@ -326,13 +354,11 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/models")
 @router.get("/v1/models")
 async def get_models():
     model_list = [{"id": name, "object": "model", "type": "llm"} for name in BOT_NAMES]
     return {"data": model_list, "object": "list"}
-
 
 async def initialize_tokens(tokens: List[str]):
     if not tokens or all(not token for token in tokens):
@@ -349,9 +375,7 @@ async def initialize_tokens(tokens: List[str]):
             api_key_cycle = itertools.cycle(client_dict.values())
             logger.info(f"Successfully initialized {len(client_dict)} API tokens")
 
-
 app.include_router(router)
-
 
 async def main(tokens: List[str] = None):
     try:
@@ -367,7 +391,6 @@ async def main(tokens: List[str] = None):
     except Exception as e:
         logger.error(f"Failed to start server: {str(e)}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     asyncio.run(main(POE_API_KEYS))
