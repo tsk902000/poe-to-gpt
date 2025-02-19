@@ -215,7 +215,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 async def create_completion(request: CompletionRequest, token: str = Depends(verify_token)):
     request_id = "chat$poe-to-gpt$-" + token[:6]
     try:
-        # Log request parameters (safely hide content if too long)
+        # Log request parameters (safely eyeing the content)
         safe_request = request.model_dump()
         if "messages" in safe_request:
             safe_request["messages"] = [
@@ -232,7 +232,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
             raise HTTPException(status_code=400, detail=f"Model {request.model} not found")
         request.model = bot_names_map[model_lower]
 
-        # Convert Message objects to ProtocolMessage objects (including attachments)
+        # Convert messages to ProtocolMessage objects (including attachments)
         protocol_messages = []
         for msg in request.messages:
             pm = ProtocolMessage(
@@ -245,30 +245,31 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
 
         poe_token = next(api_key_cycle)
 
+        # We do NOT want to support tool call execution on the backend.
+        # So we pass an empty mapping to tool_executables.
+        executables = {}  # No support for executing tool calls; we will simply return them.
+
         if request.stream:
-            # Streaming response: similar to your original implementation
             async def response_generator():
                 total_response = ""
                 last_sent_base_content = None
 
                 import re
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
-
                 try:
-                    # Ensure tool_executables is provided when tools are passed
-                    executables = request.tool_executables if request.tool_executables is not None else []
                     async for partial in get_bot_response(
                         protocol_messages,
                         bot_name=request.model,
                         api_key=poe_token,
                         session=proxy,
                         tools=request.tools,
-                        tool_executables=executables
+                        tool_executables=executables  # empty dict means we do not execute anything
                     ):
-                        # Ignore placeholder texts
                         if partial and partial.text:
+                            # Skip placeholder texts
                             if partial.text.strip() in ["Thinking...", "Generating image..."]:
                                 continue
+
                             base_content = elapsed_time_pattern.sub("", partial.text)
                             if last_sent_base_content == base_content:
                                 continue
@@ -288,35 +289,54 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                             yield f"data: {json.dumps(chunk)}\n\n"
                             last_sent_base_content = base_content
 
-                    # Send the final chunk marker to indicate completion
+                except KeyError as e:
+                    # Since tool execution is not supported, a missing tool key causes a KeyError.
+                    # We catch it and instead return the function call to LobeChat.
+                    missing_tool = str(e.args[0])
+                    function_call_data = {
+                        "name": missing_tool,
+                        "arguments": "{}"  # No arguments captured (or you can pass more details if known)
+                    }
                     end_chunk = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
                         "created": int(asyncio.get_event_loop().time()),
                         "model": request.model,
                         "choices": [{
-                            "delta": {},
+                            "delta": {"content": "", "function_call": function_call_data},
                             "index": 0,
-                            "finish_reason": "stop"
+                            "finish_reason": "function_call"
                         }]
                     }
                     yield f"data: {json.dumps(end_chunk)}\n\n"
                     yield "data: [DONE]\n\n"
+                    logger.info(f"Function Call Response [{request_id}]: {json.dumps(end_chunk)}")
+                    return
 
-                    logger.info(f"Stream Response [{request_id}]: {total_response[:200]+'...' if len(total_response) > 200 else total_response}")
-                except Exception as e:
-                    logger.error(f"Error in stream generation for [{request_id}]: {str(e)}")
-                    raise
+                # At the end of streaming, send a final marker if no error occurred.
+                end_chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(asyncio.get_event_loop().time()),
+                    "model": request.model,
+                    "choices": [{
+                        "delta": {},
+                        "index": 0,
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(end_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+                logger.info(f"Stream Response [{request_id}]: {total_response[:200]+'...' if len(total_response) > 200 else total_response}")
 
             return StreamingResponse(response_generator(), media_type="text/event-stream")
         else:
-            # Non-streaming response
+            # Non-streaming response; use get_responses.
             response = await get_responses(request, poe_token)
-            # Attempt to see if GPT has returned a function call by parsing the response as JSON.
             try:
                 parsed_response = json.loads(response)
                 if isinstance(parsed_response, dict) and "name" in parsed_response and "arguments" in parsed_response:
-                    # Build and return a structured response for a function call.
                     response_data = {
                         "id": request_id,
                         "object": "chat.completion",
@@ -335,10 +355,9 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     logger.info(f"Function Call Response [{request_id}]: {json.dumps(response_data)}")
                     return response_data
             except json.JSONDecodeError:
-                # If the response is not JSON decodable or not a function call, fall through to returning text.
+                # Not a function call response; proceed to return text.
                 pass
 
-            # Default: return the response as a normal text output.
             response_data = {
                 "id": request_id,
                 "object": "chat.completion",
@@ -353,8 +372,9 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                     "finish_reason": "stop"
                 }]
             }
-            logger.info(f"Text Response [{request_id}]: {json.dumps(response_data, ensure_ascii=False)[:200]+'...' if len(response) > 200 else json.dumps(response_data, ensure_ascii=False)}")
+            logger.info(f"Text Response [{request_id}]: {json.dumps(response_data, ensure_ascii=False)}")
             return response_data
+
     except GeneratorExit:
         logger.info(f"GeneratorExit exception caught for request [{request_id}]")
     except Exception as e:
