@@ -1,87 +1,91 @@
 ## poe-to-gpt
-一个转换器，可以将 POE 提供的 API 令牌转换为 OpenAI 的 API 格式，从而使依赖于 OpenAI API 的其他应用程序可以使用 POE 的 API。
+A converter that transforms POE's API token into OpenAI's API format, enabling other applications that depend on OpenAI API to use POE's API.
 
-这是一个工具，将 Poe官方网站提供的 API 密钥转换为兼容的 OpenAI API 密钥。它使 Poe API 密钥可以与依赖于 OpenAI API 密钥的工具一起使用。开发此工具的主要原因是为中国大陆用户提供便利和稳定性，因为他们发现订阅和充值 OpenAI API 不太方便。
+This tool converts API keys provided by the Poe official website into compatible OpenAI API keys. It allows Poe API keys to be used with tools that rely on OpenAI API keys. The main reason for developing this tool is to provide convenience and stability for users in mainland China, who find it inconvenient to subscribe to and recharge OpenAI API.
 
-请注意，目前**仅限 Poe 订阅者访问 API 密钥**。
+Please note that **API keys are currently only available to Poe subscribers**.
 
-poe 订阅者获取API key地址：[https://poe.com/api_key](https://poe.com/api_key)
+Poe subscribers can get their API key at: [https://poe.com/api_key](https://poe.com/api_key)
 
-**新版本简化了程序和部署方式。**
+**The new version simplifies the procedures and deployment methods.**
 
-[English Document](https://github.com/formzs/poe-to-gpt/blob/main/README_en.md)
+[中文文档](https://github.com/formzs/poe-to-gpt/blob/main/README.md)
 
-#### 安装
+#### Installation
 
-将此存储库克隆到本地机器：
+Clone this repository to your local machine:
 
 ```
 git clone https://github.com/formzs/poe-to-gpt.git
 cd poe-to-gpt/
 ```
 
-从 requirements.txt 安装依赖项：
+Install dependencies from requirements.txt:
 
 ```
 pip install -r requirements.txt
 ```
 
-在项目的根目录中创建配置文件。指令已写在注释中：
+Create a configuration file in the project's root directory. Instructions are in the comments:
 
 ```
 cp .env.example .env
 vim .env
 ```
 
-启动项目：
+Start the project:
 
 ```
-# 默认运行在端口 3700
+# Runs on port 3700 by default
 python app.py
 ```
 
-#### Docker （推荐）
-##### 方式一：使用本仓库构建好的 docker 镜像
+#### Docker (Recommended)
+##### Method 1: Use the pre-built Docker image from this repository
 ```
-# 下载.env.example和docker-compose.yml文件到指定文件夹，例如：/usr/local/poe-to-gpt
+# Download the .env.example and docker-compose.yml files to the specified directory, for example: /usr/local/poe-to-gpt
 mkdir /usr/local/poe-to-gpt
 cd /usr/local/poe-to-gpt
 wget https://raw.githubusercontent.com/formzs/poe-to-gpt/refs/heads/main/docker-compose.yml
 wget https://raw.githubusercontent.com/formzs/poe-to-gpt/refs/heads/main/.env.example
-# 复制修改配置文件
+# Copy and modify the configuration file
 cp .env.example .env
 vim .env
-# 启动容器，默认运行在端口 3700
+# Start the container, running by default on port 3700
 docker-compose up -d
 ```
-##### 方式二：自构建 docker 镜像
+##### Method 2: Build the Docker image yourself
 ```
 git clone https://github.com/formzs/poe-to-gpt.git
 cd poe-to-gpt/
-# 复制修改配置文件
+# Copy and modify the configuration file
 cp .env.example .env
 vim .env
-# 构建并启动，默认运行在端口 3700
+# Build and start, running by default on port 3700
 docker compose -f docker-compose-build.yml up -d --build
 ```
 
-### 使用
+### Usage
 
-请查看 [OpenAI 文档](https://platform.openai.com/docs/api-reference/chat/create) 以获取有关如何使用 ChatGPT API 的更多详细信息。
+Please refer to [OpenAI documentation](https://platform.openai.com/docs/api-reference/chat/create) for more details on how to use the ChatGPT API.
 
-只需在您的代码中将 `https://api.openai.com` 替换为 `http://localhost:3700` 即可开始使用。
-> 注意：请务必输入自定义 API 密钥（对应字段为 `.env` 中的 `ACCESS_TOKENS` ）
+Simply replace `https://api.openai.com` with `http://localhost:3700` in your code to start using it.
+> Note: Make sure to input your custom API key (corresponding to the `ACCESS_TOKENS` field in `.env`)
 
-支持的路由：
+Supported routes:
 - /chat/completions
 - /v1/chat/completions
 - /models
 - /v1/models
 
-## 支持的模型参数（对应poe上机器人名称可自行修改.env环境变量文件添加）。
+Added /completions to support cline and continue.dev
+
+## Supported Model Parameters (The bot name on the POE marketplace can be changed by modifying the .env environment variable file)
 - GPT-4o
 - GPT-4o-Mini
 - GPT-3.5-Turbo
+- Claude-3.7-Sonnet
+- Claude-3.7-Sonnet-Reasoning
 - Claude-3.5-Sonnet
 - Claude-3-opus
 - Gemini-2.0-Pro
@@ -89,7 +93,6 @@ docker compose -f docker-compose-build.yml up -d --build
 - Deepseek-v3-T
 - DALL-E-3
 
-
-## 鸣谢
+## Acknowledgments
 - https://github.com/juzeon/poe-openai-proxy
 - https://developer.poe.com/server-bots/accessing-other-bots-on-poe
