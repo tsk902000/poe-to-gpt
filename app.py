@@ -421,37 +421,6 @@ async def get_models():
     model_list = [{"id": name, "object": "model", "type": "llm"} for name in BOT_NAMES]
     return {"data": model_list, "object": "list"}
 
-async def initialize_tokens(tokens: List[str]):
-    if not tokens or all(not token for token in tokens):
-        logger.error("No API keys found in the configuration.")
-        sys.exit(1)
-    else:
-        for token in tokens:
-            await add_token(token)
-        if not client_dict:
-            logger.error("No valid tokens were added.")
-            sys.exit(1)
-        else:
-            global api_key_cycle
-            api_key_cycle = itertools.cycle(client_dict.values())
-            logger.info(f"Successfully initialized {len(client_dict)} API tokens")
-
-app.include_router(router)
-
-async def main(tokens: List[str] = None):
-    try:
-        await initialize_tokens(tokens)
-        conf = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=PORT,
-            log_level="info"
-        )
-        server = uvicorn.Server(conf)
-        await server.serve()
-    except Exception as e:
-        logger.error(f"Failed to start server: {str(e)}")
-        sys.exit(1)
 
 # Add this new endpoint handler with the other endpoints
 @router.post("/v1/completions")
@@ -585,6 +554,40 @@ async def create_legacy_completion(request: CompletionRequestLegacy, token: str 
         error_msg = f"[{request_id}] Error during response: {str(e)}"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
+
+async def initialize_tokens(tokens: List[str]):
+    if not tokens or all(not token for token in tokens):
+        logger.error("No API keys found in the configuration.")
+        sys.exit(1)
+    else:
+        for token in tokens:
+            await add_token(token)
+        if not client_dict:
+            logger.error("No valid tokens were added.")
+            sys.exit(1)
+        else:
+            global api_key_cycle
+            api_key_cycle = itertools.cycle(client_dict.values())
+            logger.info(f"Successfully initialized {len(client_dict)} API tokens")
+
+app.include_router(router)
+
+async def main(tokens: List[str] = None):
+    try:
+        await initialize_tokens(tokens)
+        conf = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=PORT,
+            log_level="info"
+        )
+        server = uvicorn.Server(conf)
+        await server.serve()
+    except Exception as e:
+        logger.error(f"Failed to start server: {str(e)}")
+        sys.exit(1)
+
+
 
 
 if __name__ == "__main__":
