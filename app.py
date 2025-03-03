@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union  
 from pydantic import BaseModel
 import asyncio
 import uvicorn
@@ -76,6 +76,30 @@ class Message(BaseModel):
 # STEP 2: Add function calling (tools) support.
 # Update the CompletionRequest model to allow passing tools and tool executables.
 # -------------------------------------------------------------------
+
+class CompletionRequestLegacy(BaseModel):
+    model: str
+    prompt: str
+    stream: Optional[bool] = False
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    frequency_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = 0.0
+    logit_bias: Optional[Dict[str, int]] = None
+    stop: Optional[Union[str, List[str]]] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "model": "GPT-3.5-Turbo",
+                "prompt": "Once upon a time",
+                "stream": True,
+                "temperature": 0.7,
+                "max_tokens": 100
+            }
+        }
+
 class CompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -428,6 +452,140 @@ async def main(tokens: List[str] = None):
     except Exception as e:
         logger.error(f"Failed to start server: {str(e)}")
         sys.exit(1)
+
+# Add this new endpoint handler with the other endpoints
+@router.post("/v1/completions")
+@router.post("/completions")
+async def create_legacy_completion(request: CompletionRequestLegacy, token: str = Depends(verify_token)):
+    request_id = "completion$poe-to-gpt$-" + token[:6]
+    try:
+        # Log the incoming request
+        safe_request = request.model_dump()
+        if "prompt" in safe_request:
+            safe_request["prompt"] = safe_request["prompt"][:100] + "..." if len(safe_request["prompt"]) > 100 else safe_request["prompt"]
+        logger.info(f"[{request_id}] Incoming Legacy Completion Request: {json.dumps(safe_request, ensure_ascii=False)}")
+
+        if not api_key_cycle:
+            raise HTTPException(status_code=500, detail="No valid API tokens available")
+
+        model_lower = request.model.lower()
+        if model_lower not in bot_names_map:
+            raise HTTPException(status_code=400, detail=f"Model {request.model} not found")
+        model_name = bot_names_map[model_lower]
+
+        # Convert to protocol messages
+        protocol_messages = [ProtocolMessage(
+            role="user",
+            content=request.prompt
+        )]
+        
+        poe_token = next(api_key_cycle)
+        
+        # For streaming response
+        if request.stream:
+            async def response_generator():
+                total_response = ""
+                last_sent_base_content = None
+                import re
+                elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
+                try:
+                    async for partial in get_bot_response(
+                        protocol_messages,
+                        bot_name=model_name,
+                        api_key=poe_token,
+                        session=proxy
+                    ):
+                        if partial and partial.text:
+                            # Skip placeholder messages
+                            if partial.text.strip() in ["Thinking...", "Generating image..."]:
+                                logger.debug(f"[{request_id}] Skipping placeholder text: {partial.text.strip()}")
+                                continue
+
+                            base_content = elapsed_time_pattern.sub("", partial.text)
+                            if last_sent_base_content == base_content:
+                                continue
+
+                            total_response += base_content
+                            # Completions API format
+                            chunk = {
+                                "id": request_id,
+                                "object": "text_completion",
+                                "created": int(asyncio.get_event_loop().time()),
+                                "model": model_name,
+                                "choices": [{
+                                    "text": base_content,
+                                    "index": 0,
+                                    "logprobs": None,
+                                    "finish_reason": None
+                                }]
+                            }
+                            chunk_json = json.dumps(chunk)
+                            logger.debug(f"[{request_id}] Sending chunk: {chunk_json}")
+                            yield f"data: {chunk_json}\n\n"
+                            last_sent_base_content = base_content
+
+                except Exception as e:
+                    logger.error(f"[{request_id}] Error during streaming: {str(e)}")
+                    
+                # Send the final chunk marker
+                end_chunk = {
+                    "id": request_id,
+                    "object": "text_completion",
+                    "created": int(asyncio.get_event_loop().time()),
+                    "model": model_name,
+                    "choices": [{
+                        "text": "",
+                        "index": 0,
+                        "logprobs": None,
+                        "finish_reason": "stop"
+                    }]
+                }
+                end_chunk_json = json.dumps(end_chunk)
+                logger.debug(f"[{request_id}] Sending final chunk: {end_chunk_json}")
+                yield f"data: {end_chunk_json}\n\n"
+                yield "data: [DONE]\n\n"
+
+                logger.info(f"[{request_id}] Stream Response: {total_response[:200]+'...' if len(total_response) > 200 else total_response}")
+
+            return StreamingResponse(response_generator(), media_type="text/event-stream")
+
+        else:
+            # For non-streaming responses, convert to CompletionRequest format
+            chat_request = CompletionRequest(
+                model=model_name,
+                messages=[Message(role="user", content=request.prompt)],
+                stream=False,
+                temperature=request.temperature,
+                stop_sequences=[request.stop] if isinstance(request.stop, str) and request.stop else request.stop,
+                logit_bias=request.logit_bias,
+            )
+            
+            response = await get_responses(chat_request, poe_token)
+            logger.debug(f"[{request_id}] Raw response from get_responses: {response}")
+
+            # Return completions API format
+            response_data = {
+                "id": request_id,
+                "object": "text_completion",
+                "created": int(asyncio.get_event_loop().time()),
+                "model": model_name,
+                "choices": [{
+                    "text": response,
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": "stop"
+                }]
+            }
+            logger.info(f"[{request_id}] Non-stream text response: {json.dumps(response_data, ensure_ascii=False, indent=2)}")
+            return response_data
+
+    except GeneratorExit:
+        logger.info(f"[{request_id}] GeneratorExit exception caught")
+    except Exception as e:
+        error_msg = f"[{request_id}] Error during response: {str(e)}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
 
 if __name__ == "__main__":
     asyncio.run(main(POE_API_KEYS))
