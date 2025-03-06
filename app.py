@@ -105,10 +105,13 @@ class CompletionRequest(BaseModel):
     messages: List[Message]
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
     skip_system_prompt: Optional[bool] = None
     frequency_penalty: Optional[float] = 0.0
     presence_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, int]] = None
+    stop: Optional[Union[str, List[str]]] = None  # OpenAI compatible param
     stop_sequences: Optional[List[str]] = None
     # New field for OpenAI function calling: tool definitions.
     tools: Optional[List[ToolDefinition]] = None
@@ -186,12 +189,27 @@ async def get_responses(request: CompletionRequest, token: str):
                 pm.attachments = msg.attachments
             protocol_messages.append(pm)
         
+        # Process stop parameters - prioritize stop_sequences, but fall back to stop if provided
+        stop_seqs = []
+        if request.stop_sequences is not None:
+            stop_seqs = request.stop_sequences
+        elif request.stop is not None:
+            if isinstance(request.stop, str):
+                stop_seqs = [request.stop]
+            else:
+                stop_seqs = request.stop
+        
         additional_params = {
             "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "top_p": request.top_p,
             "skip_system_prompt": request.skip_system_prompt if request.skip_system_prompt is not None else False,
             "logit_bias": request.logit_bias if request.logit_bias is not None else {},
-            "stop_sequences": request.stop_sequences if request.stop_sequences is not None else []
+            "stop_sequences": stop_seqs
         }
+        
+        # Remove None values
+        additional_params = {k: v for k, v in additional_params.items() if v is not None}
         # Inject tools into the query if provided (for function calling)
         if request.tools is not None:
             additional_params["tools"] = request.tools
@@ -235,7 +253,9 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     return credentials.credentials
 
 @router.post("/v1/chat/completions")
+@router.post("/v1/chat/completion")
 @router.post("/chat/completions")
+@router.post("/chat/completion")
 async def create_completion(request: CompletionRequest, token: str = Depends(verify_token)):
     request_id = "chat$poe-to-gpt$-" + token[:6]
     try:
@@ -281,13 +301,35 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                 import re
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
                 try:
+                    # Process stop parameters for streaming
+                    stop_seqs = []
+                    if request.stop_sequences is not None:
+                        stop_seqs = request.stop_sequences
+                    elif request.stop is not None:
+                        if isinstance(request.stop, str):
+                            stop_seqs = [request.stop]
+                        else:
+                            stop_seqs = request.stop
+                    
+                    # Prepare parameters for streaming request
+                    stream_params = {
+                        "bot_name": request.model,
+                        "api_key": poe_token,
+                        "session": proxy,
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                        "top_p": request.top_p,
+                        "stop_sequences": stop_seqs,
+                        "tools": request.tools,
+                        "tool_executables": executables  # intentionally empty
+                    }
+                    
+                    # Remove None values
+                    stream_params = {k: v for k, v in stream_params.items() if v is not None}
+                    
                     async for partial in get_bot_response(
                         protocol_messages,
-                        bot_name=request.model,
-                        api_key=poe_token,
-                        session=proxy,
-                        tools=request.tools,
-                        tool_executables=executables  # intentionally empty
+                        **stream_params
                     ):
                         if partial and partial.text:
                             # Skip placeholder messages.
@@ -458,11 +500,29 @@ async def create_legacy_completion(request: CompletionRequestLegacy, token: str 
                 import re
                 elapsed_time_pattern = re.compile(r" \(\d+s elapsed\)$")
                 try:
+                    # Prepare parameters for legacy streaming request
+                    stream_params = {
+                        "bot_name": model_name,
+                        "api_key": poe_token,
+                        "session": proxy,
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_tokens,
+                        "top_p": request.top_p
+                    }
+                    
+                    # Add stop sequences if provided
+                    if request.stop:
+                        if isinstance(request.stop, str):
+                            stream_params["stop_sequences"] = [request.stop]
+                        else:
+                            stream_params["stop_sequences"] = request.stop
+                    
+                    # Remove None values
+                    stream_params = {k: v for k, v in stream_params.items() if v is not None}
+                    
                     async for partial in get_bot_response(
                         protocol_messages,
-                        bot_name=model_name,
-                        api_key=poe_token,
-                        session=proxy
+                        **stream_params
                     ):
                         if partial and partial.text:
                             # Skip placeholder messages
@@ -525,8 +585,12 @@ async def create_legacy_completion(request: CompletionRequestLegacy, token: str 
                 messages=[Message(role="user", content=request.prompt)],
                 stream=False,
                 temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                top_p=request.top_p,
                 stop_sequences=[request.stop] if isinstance(request.stop, str) and request.stop else request.stop,
                 logit_bias=request.logit_bias,
+                frequency_penalty=request.frequency_penalty,
+                presence_penalty=request.presence_penalty
             )
             
             response = await get_responses(chat_request, poe_token)
