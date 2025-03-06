@@ -61,14 +61,16 @@ else:
 # Client API key management
 client_dict = {}
 api_key_cycle = None
-bot_names_map = {name.lower(): name for name in BOT_NAMES}
+# Ensure we have at least one default bot if BOT_NAMES is empty
+DEFAULT_BOT_NAME = "Claude-3-Opus"
+bot_names_map = {name.lower(): name for name in (BOT_NAMES or [DEFAULT_BOT_NAME])}
 
 # -------------------------------------------------------------------
 # STEP 1: Add attachment support by updating the Message model.
 # -------------------------------------------------------------------
 class Message(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = ""  # Make content optional and default to empty string
     # New field: allow attachments using fastapi_poe.Attachment
     attachments: Optional[List[Attachment]] = None
 
@@ -116,7 +118,7 @@ class CompletionRequest(BaseModel):
     # New field for OpenAI function calling: tool definitions.
     tools: Optional[List[ToolDefinition]] = None
     # New field for function calling: tool executables.
-    # Ensure that if tools are provided, tool_executables is explicitly set (can be empty).
+    # Making this field truly optional to avoid validation errors
     tool_executables: Optional[List[Any]] = None
 
     class Config:
@@ -181,9 +183,11 @@ async def get_responses(request: CompletionRequest, token: str):
         # Convert internal Message objects to ProtocolMessage objects, including attachments.
         protocol_messages = []
         for msg in request.messages:
+            # Ensure content is never None (even though we set default="")
+            content = msg.content if msg.content is not None else ""
             pm = ProtocolMessage(
                 role=msg.role if msg.role in ["user", "system"] else "bot",
-                content=msg.content
+                content=content
             )
             if msg.attachments:
                 pm.attachments = msg.attachments
@@ -210,7 +214,8 @@ async def get_responses(request: CompletionRequest, token: str):
         
         # Remove None values
         additional_params = {k: v for k, v in additional_params.items() if v is not None}
-        # Inject tools into the query if provided (for function calling)
+        
+        # Carefully handle tools - only add if explicitly provided
         if request.tools is not None:
             additional_params["tools"] = request.tools
 
@@ -279,9 +284,11 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         # Convert CompletionRequest messages into ProtocolMessage objects.
         protocol_messages = []
         for msg in request.messages:
+            # Ensure content is never None (even though we set default="")
+            content = msg.content if msg.content is not None else ""
             pm = ProtocolMessage(
                 role=msg.role if msg.role in ["user", "system"] else "bot",
-                content=msg.content
+                content=content
             )
             if msg.attachments:
                 pm.attachments = msg.attachments
@@ -319,10 +326,13 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                         "temperature": request.temperature,
                         # max_tokens is not supported by get_bot_response
                         "top_p": request.top_p,
-                        "stop_sequences": stop_seqs,
-                        "tools": request.tools,
-                        "tool_executables": executables  # intentionally empty
+                        "stop_sequences": stop_seqs
                     }
+                    
+                    # Add tools only if they're explicitly provided
+                    if request.tools is not None:
+                        stream_params["tools"] = request.tools
+                        stream_params["tool_executables"] = executables  # intentionally empty
                     
                     # Remove None values
                     stream_params = {k: v for k, v in stream_params.items() if v is not None}
