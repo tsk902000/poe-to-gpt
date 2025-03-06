@@ -57,6 +57,12 @@ docker-compose logs -f
 - Accepts Poe API format
 - Returns GPT-compatible JSON response
 
+## Supported Extension
+
+- Cline
+- Continue.dev
+
+
 ## Contributing
 
 1. Fork the repository
