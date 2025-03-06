@@ -111,7 +111,7 @@ bot_names_map = {name.lower(): name for name in (BOT_NAMES or [DEFAULT_BOT_NAME]
 # -------------------------------------------------------------------
 class Message(BaseModel):
     role: str
-    content: Optional[str] = ""  # Make content optional and default to empty string
+    content: Optional[Union[str, List[Dict[str, Any]]]] = ""  # Make content optional and support both string and structured format
     # New field: allow attachments using fastapi_poe.Attachment
     attachments: Optional[List[Attachment]] = None
 
@@ -228,6 +228,16 @@ async def get_responses(request: CompletionRequest, token: str):
         for msg in request.messages:
             # Ensure content is never None (even though we set default="")
             content = msg.content if msg.content is not None else ""
+            
+            # Handle structured content format (list of objects with type and text)
+            if isinstance(content, list):
+                # Extract and combine text fields from content items
+                combined_text = ""
+                for item in content:
+                    if isinstance(item, dict) and "text" in item:
+                        combined_text += item["text"]
+                content = combined_text
+            
             pm = ProtocolMessage(
                 role=msg.role if msg.role in ["user", "system"] else "bot",
                 content=content
@@ -349,6 +359,16 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
         for msg in request.messages:
             # Ensure content is never None (even though we set default="")
             content = msg.content if msg.content is not None else ""
+            
+            # Handle structured content format (list of objects with type and text)
+            if isinstance(content, list):
+                # Extract and combine text fields from content items
+                combined_text = ""
+                for item in content:
+                    if isinstance(item, dict) and "text" in item:
+                        combined_text += item["text"]
+                content = combined_text
+            
             pm = ProtocolMessage(
                 role=msg.role if msg.role in ["user", "system"] else "bot",
                 content=content
