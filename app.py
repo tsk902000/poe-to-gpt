@@ -317,7 +317,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                         "api_key": poe_token,
                         "session": proxy,
                         "temperature": request.temperature,
-                        "max_tokens": request.max_tokens,
+                        # max_tokens is not supported by get_bot_response
                         "top_p": request.top_p,
                         "stop_sequences": stop_seqs,
                         "tools": request.tools,
@@ -506,7 +506,7 @@ async def create_legacy_completion(request: CompletionRequestLegacy, token: str 
                         "api_key": poe_token,
                         "session": proxy,
                         "temperature": request.temperature,
-                        "max_tokens": request.max_tokens,
+                        # max_tokens is not supported by get_bot_response
                         "top_p": request.top_p
                     }
                     
