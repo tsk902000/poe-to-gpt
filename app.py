@@ -8,10 +8,13 @@ import sys
 import logging
 import itertools
 import json
+import traceback
 from httpx import AsyncClient
-from fastapi import FastAPI, HTTPException, Depends, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi_poe.types import ProtocolMessage, Attachment, ToolDefinition
 from fastapi_poe.client import get_bot_response, get_final_response, QueryRequest, BotError
 
@@ -26,6 +29,48 @@ router = APIRouter()
 PORT = int(os.getenv("PORT", 3700))
 TIMEOUT = int(os.getenv("TIMEOUT", 120))
 PROXY = os.getenv("PROXY", "")
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Add validation error handlers for detailed debugging
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    error_detail = str(exc)
+    body = await request.body()
+    logger.error(f"Validation Error: {error_detail}")
+    logger.error(f"Request URL: {request.url}")
+    logger.error(f"Request headers: {request.headers}")
+    try:
+        if body:
+            body_text = body.decode()
+            logger.error(f"Request body: {body_text}")
+            # If it's JSON, let's try to parse it to see what's causing the issue
+            try:
+                body_json = json.loads(body_text)
+                logger.error(f"Request JSON: {json.dumps(body_json, indent=2)}")
+            except json.JSONDecodeError:
+                logger.error("Body is not valid JSON")
+    except Exception as e:
+        logger.error(f"Error decoding body: {str(e)}")
+    
+    # Log traceback for more details
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(body)},
+    )
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.error(f"HTTP Exception: {exc.detail} - Status Code: {exc.status_code}")
+    logger.error(f"Request URL: {request.url}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
 
 # Parse JSON array from environment variable
 def parse_json_env(env_name, default=None):
@@ -47,10 +92,6 @@ def parse_json_env(env_name, default=None):
 ACCESS_TOKENS = set(parse_json_env("ACCESS_TOKENS"))
 BOT_NAMES = parse_json_env("BOT_NAMES")
 POE_API_KEYS = parse_json_env("POE_API_KEYS")
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Initialize AsyncClient proxy for HTTP requests
 if not PROXY:
@@ -121,7 +162,9 @@ class CompletionRequest(BaseModel):
     # Making this field truly optional to avoid validation errors
     tool_executables: Optional[List[Any]] = None
 
+    # Extra options to make validation more permissive
     class Config:
+        extra = "ignore"  # Allow extra fields in the request
         json_schema_extra = {
             "example": {
                 "model": "GPT-3.5-Turbo",
@@ -256,6 +299,26 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             headers={"WWW-Authenticate": "Bearer"},
         )
     return credentials.credentials
+
+# Catch-all to log raw request before any validation
+@app.middleware("http")
+async def log_raw_request(request: Request, call_next):
+    # Log the raw request for debugging
+    if request.url.path in ["/v1/chat/completions", "/v1/chat/completion", "/chat/completions", "/chat/completion"]:
+        try:
+            body = await request.body()
+            logger.info(f"Raw request to {request.url.path}:")
+            logger.info(f"Headers: {request.headers}")
+            body_text = body.decode('utf-8')
+            logger.info(f"Body: {body_text}")
+            # Reset the request body for downstream consumption
+            request._body = body
+        except Exception as e:
+            logger.error(f"Error logging raw request: {str(e)}")
+    
+    # Process the request
+    response = await call_next(request)
+    return response
 
 @router.post("/v1/chat/completions")
 @router.post("/v1/chat/completion")
