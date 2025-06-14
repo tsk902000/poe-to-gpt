@@ -408,7 +408,7 @@ async def create_completion(request: CompletionRequest, token: str = Depends(ver
                         "session": proxy,
                         "temperature": request.temperature,
                         # max_tokens is not supported by get_bot_response
-                        "top_p": request.top_p,
+                        # top_p is not supported by get_bot_response
                         "stop_sequences": stop_seqs
                     }
                     
@@ -600,7 +600,7 @@ async def create_legacy_completion(request: CompletionRequestLegacy, token: str 
                         "session": proxy,
                         "temperature": request.temperature,
                         # max_tokens is not supported by get_bot_response
-                        "top_p": request.top_p
+                        # top_p is not supported by get_bot_response
                     }
                     
                     # Add stop sequences if provided
